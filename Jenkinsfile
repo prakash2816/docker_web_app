@@ -19,7 +19,9 @@ pipeline {
                 script {
                     echo "Installing kubectl and eksctl..."
                     sh '''
+                        set -e
                         mkdir -p ${WORKSPACE}/bin
+                        export PATH=${WORKSPACE}/bin:$PATH
 
                         # Install kubectl
                         curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
@@ -29,10 +31,25 @@ pipeline {
                         # Install eksctl
                         curl -sLO https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz
                         tar -xzf eksctl_Linux_amd64.tar.gz
+                        chmod +x eksctl
                         mv eksctl ${WORKSPACE}/bin/
 
                         kubectl version --client
                         eksctl version
+                    '''
+                }
+            }
+        }
+
+        stage('Configure AWS') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+                    sh '''
+                        set -e
+                        aws sts get-caller-identity
                     '''
                 }
             }
@@ -59,6 +76,7 @@ pipeline {
                         passwordVariable: 'DOCKER_PASS'
                     )]) {
                         sh '''
+                            set -e
                             echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
                             docker build -t $DOCKER_IMAGE .
                             docker push $DOCKER_IMAGE
@@ -72,14 +90,16 @@ pipeline {
             steps {
                 script {
                     echo "Checking EKS cluster..."
+
                     def exists = sh(
-                        script: "eksctl get cluster --name ${CLUSTER_NAME} --region ${AWS_REGION}",
+                        script: "eksctl get cluster --region ${AWS_REGION} --name ${CLUSTER_NAME} >/dev/null 2>&1",
                         returnStatus: true
                     ) == 0
 
                     if (!exists) {
                         echo "Creating EKS cluster..."
                         sh """
+                            set -e
                             eksctl create cluster \
                               --name ${CLUSTER_NAME} \
                               --region ${AWS_REGION} \
@@ -92,7 +112,11 @@ pipeline {
                         echo "Cluster already exists."
                     }
 
-                    sh "aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_REGION}"
+                    sh """
+                        set -e
+                        aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_REGION}
+                        kubectl get nodes
+                    """
                 }
             }
         }
@@ -101,6 +125,7 @@ pipeline {
             steps {
                 script {
                     sh '''
+                        set -e
                         kubectl apply -f nodejsapp.yaml
 
                         echo "Waiting for LoadBalancer..."
@@ -111,11 +136,14 @@ pipeline {
                             echo "================================="
                             echo "APP URL: http://$HOST"
                             echo "================================="
-                            break
+                            exit 0
                           fi
                           echo "Waiting for external IP... ($i/30)"
                           sleep 20
                         done
+
+                        echo "LoadBalancer not ready in time"
+                        exit 1
                     '''
                 }
             }
